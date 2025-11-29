@@ -1,3 +1,7 @@
+<p align="center">
+  <img width="240" height="240" src="https://cdn.discordapp.com/attachments/1078837522882367508/1114897951177855059/fstech_logo.png">
+</p>
+
 # FS-GUDANG
 
 Script sewa gudang FiveM yang memiliki fitur lebih dari script sewa gudang biasanya. Kamu dapat memasang pin pada gudang kamu dan dapat mengakses gudang orang lain dengan menggunnakan kode gudang dan kode pin.

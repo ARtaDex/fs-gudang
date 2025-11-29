@@ -1,190 +1,201 @@
-local QBCore = exports['qb-core']:GetCoreObject()
+local ESX = exports['es_extended']:getSharedObject()
 local ListGudang = {}
-local ListGudangStatus = false
 
-local function GetAllDataGudang()
-    for k,v in pairs(Config.Gudang.location) do
-        ListGudang[k] = {}
+-- Fungsi untuk membersihkan gudang yang sudah expired
+local function CheckExpiredGudang()
+    -- Hapus gudang yang expired_at nya < NOW()
+    local affected = MySQL.update.await('DELETE FROM gudang WHERE expired_at IS NOT NULL AND expired_at < NOW()')
+    if affected > 0 then
+        print('^3[Gudang]^7 Menghapus ' .. affected .. ' gudang yang masa sewanya habis.')
     end
-    local data = MySQL.query.await('SELECT * from gudang')
-    for i=1, #data, 1 do
-        kode = data[i].kode
-        lokasi = data[i].lokasi
-        if ListGudang[lokasi] ~= nil then
-            ListGudang[lokasi][kode] = {
-                kode                = data[i].kode,
-                lokasi              = data[i].lokasi,
-                owner               = data[i].owner,
-                pin                 = data[i].pin,
+end
+
+-- Load Data saat start
+local function LoadAllGudang()
+    CheckExpiredGudang() -- Bersihkan dulu yang expired sebelum load
+    ListGudang = {}
+    local result = MySQL.query.await('SELECT *, UNIX_TIMESTAMP(expired_at) as expired_ts FROM gudang')
+
+    if result then
+        for i = 1, #result do
+            local data = result[i]
+            if not ListGudang[data.lokasi] then ListGudang[data.lokasi] = {} end
+            
+            ListGudang[data.lokasi][data.kode] = {
+                kode = data.kode,
+                lokasi = data.lokasi,
+                owner = data.owner,
+                pin = data.pin,
+                expired_at = data.expired_ts -- Simpan timestamp untuk dikirim ke client
             }
-        else
-            ListGudang[lokasi] = {}
-            ListGudang[lokasi][kode] = {
-                kode                = data[i].kode,
-                lokasi              = data[i].lokasi,
-                owner               = data[i].owner,
-                pin                 = data[i].pin,
-            }
+
+            -- Register Stash ke ox_inventory
+            local stashId = data.lokasi .. '_' .. data.kode
+            local label = "Gudang " .. data.kode
+            exports.ox_inventory:RegisterStash(stashId, label, Config.MaxSlots, Config.MaxWeight, data.owner)
         end
     end
-    ListGudangStatus = true
+    print("^2[Gudang]^7 Data Loaded.")
 end
 
--- Fungsi Update Pin dan Simpan dalam database dan local tabel server
-local function GudangUpdatePin(data)
-    local kode = data.kode
-    local pin = data.pin
-    MySQL.query.await('UPDATE gudang SET pin = @pin WHERE kode = @kode', {
-        ['@kode'] = kode,
-        ['@pin'] = pin
-    })
-    -- Update Table
-    for i=1, #ListGudang, 1 do
-        if ListGudang[i].kode == kode then
-            ListGudang[i].pin = pin
-        end
+-- Generator Kode Unik
+local function GenerateKode()
+    local charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    local res = ""
+    for i = 1, 6 do
+        local rand = math.random(#charset)
+        res = res .. string.sub(charset, rand, rand)
     end
+    return res
 end
 
--- Fungsi Generator Kode
-local function GudangCreateHash(length)
-	local res = ""
-	for i = 1, length do
-		res = res .. string.char(math.random(97, 122))
-	end
-	return res
-end
-
-local function SetupGudang()
-    for i=1, #ListGudang, 1 do
-        local tempat
-        if ListGudang[i].lokasi == 'gudang_paleto' then
-            tempat = 'Gudang Paleto '..ListGudang[i].kode
-        elseif ListGudang[i].lokasi == 'gudang_ss' then
-            tempat = 'Gudang Sandy Shores '..ListGudang[i].kode
-        elseif ListGudang[i].lokasi == 'gudang_kota' then
-            tempat = 'Gudang Kota '..ListGudang[i].kode
-        end
-
-        stash = {
-            id = ListGudang[i].lokasi..'_'..ListGudang[i].kode,
-            label = tempat,
-            slots = 100,
-            weight = 1000000,
-            owner = false
-        }
-        print("registered gudang: "..stash.id)
-        exports.ox_inventory:RegisterStash(stash.id, stash.label, stash.slots, stash.weight, stash.owner)
-    end
-end
-
+-- Event Beli Gudang (Sewa / Permanen)
 RegisterNetEvent('gudang:buyGudang', function(data)
     local src = source
+    local xPlayer = ESX.GetPlayerFromId(src)
+    if not xPlayer then return end
+
     local pin = data.pin
     local lokasi = data.location
-    local Player = QBCore.Functions.GetPlayer(src)
-    local identifier = Player.PlayerData.citizenid
-    local kode = GudangCreateHash(6)
-    MySQL.Async.fetchScalar('SELECT COUNT(*) FROM gudang WHERE lokasi = @lokasi and kode = @kode', {
-        ['@lokasi'] = lokasi,
-        ['@kode'] = kode
-    }, function(count)
-        if count == 0 then
-            MySQL.Async.execute('INSERT INTO gudang (kode, lokasi, owner, pin) VALUES (@kode, @lokasi, @owner, @pin)', {
-                ['@kode'] = kode,
-                ['@lokasi'] = lokasi,
-                ['@owner'] = identifier,
-                ['@pin'] = pin
-            }, function(rowsChanged)
-                if rowsChanged > 0 then
-                    if ListGudang[lokasi] ~= nil then
-                        ListGudang[lokasi][kode] = {
-                            kode = kode,
-                            lokasi = lokasi,
-                            owner = identifier,
-                            pin = pin
-                        }
-                    else
-                        ListGudang[lokasi] = {}
-                        ListGudang[lokasi][kode] = {
-                            kode = kode,
-                            lokasi = lokasi,
-                            owner = identifier,
-                            pin = pin
-                        }
-                    end
-                    local tempat
-                    if lokasi == 'gudang_paleto' then
-                        tempat = 'Gudang Paleto '..kode
-                    elseif lokasi == 'gudang_ss' then
-                        tempat = 'Gudang Sandy Shores '..kode
-                    elseif lokasi == 'gudang_kota' then
-                        tempat = 'Gudang Kota '..kode
-                    end
-                    stash = {
-                        id = lokasi..'_'..kode,
-                        label = tempat,
-                        slots = 100,
-                        weight = 1000000,
-                        owner = false
-                    }
-                    print("registered gudang: "..stash.id)
-                    exports.ox_inventory:RegisterStash(stash.id, stash.label, stash.slots, stash.weight, stash.owner)
-                    TriggerClientEvent('QBCore:Notify', src, 'Kamu telah membeli gudang dengan kode: '..kode)
-                    Player.Functions.RemoveMoney('cash', Config.Gudang.price, 'beli-gudang')
-                else
-                    TriggerClientEvent('QBCore:Notify', src, 'Gagal membeli gudang')
-                end
-            end)
+    local tipe = data.type -- 'rent' atau 'perm'
+    local identifier = xPlayer.identifier
+    
+    local price = (tipe == 'perm') and Config.PricePerm or Config.PriceRent
+    
+    -- Cek Uang
+    if xPlayer.getMoney() < price then
+        return TriggerClientEvent('ox_lib:notify', src, {type = 'error', description = 'Uang tidak cukup!'})
+    end
+
+    -- Generate Kode
+    local kode = GenerateKode()
+    local check = MySQL.scalar.await('SELECT count(*) FROM gudang WHERE kode = ?', {kode})
+    if check > 0 then kode = GenerateKode() end
+
+    -- Tentukan Query berdasarkan tipe
+    local query = ''
+    local params = {}
+    
+    if tipe == 'perm' then
+        query = 'INSERT INTO gudang (kode, lokasi, owner, pin, expired_at) VALUES (?, ?, ?, ?, NULL)'
+        params = {kode, lokasi, identifier, pin}
+    else
+        -- Tambah 7 hari dari sekarang
+        query = 'INSERT INTO gudang (kode, lokasi, owner, pin, expired_at) VALUES (?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL ? DAY))'
+        params = {kode, lokasi, identifier, pin, Config.RentDuration}
+    end
+
+    MySQL.insert(query, params, function(id)
+        if id then
+            xPlayer.removeMoney(price)
+            
+            -- Ambil data expired barusan untuk cache
+            local expiredData = nil
+            if tipe == 'rent' then
+                expiredData = os.time() + (Config.RentDuration * 24 * 60 * 60)
+            end
+
+            -- Update Cache Server
+            if not ListGudang[lokasi] then ListGudang[lokasi] = {} end
+            ListGudang[lokasi][kode] = {
+                kode = kode,
+                lokasi = lokasi,
+                owner = identifier,
+                pin = pin,
+                expired_at = expiredData
+            }
+
+            -- Register Stash
+            local stashId = lokasi .. '_' .. kode
+            local label = "Gudang " .. kode
+            exports.ox_inventory:RegisterStash(stashId, label, Config.MaxSlots, Config.MaxWeight, identifier)
+
+            TriggerClientEvent('ox_lib:notify', src, {type = 'success', description = 'Berhasil! Kode: '..kode})
         else
-            TriggerClientEvent('QBCore:Notify', src, 'Gudang sudah ada yang memiliki')
+            TriggerClientEvent('ox_lib:notify', src, {type = 'error', description = 'Database error'})
         end
     end)
 end)
 
+-- Event Hapus/Jual Gudang
+RegisterNetEvent('gudang:sellGudang', function(data)
+    local src = source
+    local xPlayer = ESX.GetPlayerFromId(src)
+    local kode = data.kode
+    local lokasi = data.lokasi
 
-lib.callback.register('gudang:checkOwned', function(source, location)
-    local PlayerData = QBCore.Functions.GetPlayer(source).PlayerData
-    local identifier = PlayerData.citizenid
-    local owned = nil
-    if ListGudang[location] == nil then return nil end
-    for k,v in pairs(ListGudang[location]) do
-        if v.owner == identifier then
-            owned = v
-            break
+    -- Validasi Owner Server Side
+    if ListGudang[lokasi] and ListGudang[lokasi][kode] then
+        local gd = ListGudang[lokasi][kode]
+        if gd.owner == xPlayer.identifier then
+            
+            MySQL.update.await('DELETE FROM gudang WHERE kode = ?', {kode})
+            
+            -- Hapus dari cache
+            ListGudang[lokasi][kode] = nil
+            
+            -- Refund Uang (Hitung refund dari harga sewa atau permanen)
+            local refundAmount = 0
+            if gd.expired_at then -- Jika sewa
+                refundAmount = math.floor(Config.PriceRent * Config.RefundPercent)
+            else -- Jika permanen
+                refundAmount = math.floor(Config.PricePerm * Config.RefundPercent)
+            end
+            
+            xPlayer.addMoney(refundAmount)
+            TriggerClientEvent('ox_lib:notify', src, {type = 'success', description = 'Gudang dijual seharga $'..refundAmount})
+        else
+            TriggerClientEvent('ox_lib:notify', src, {type = 'error', description = 'Bukan milikmu!'})
         end
     end
-    return owned
 end)
 
-lib.callback.register('gudang:checkOwnedPin', function(source, data)
+lib.callback.register('gudang:checkOwned', function(source, location)
+    local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then return nil end
+    local identifier = xPlayer.identifier
+    
+    if ListGudang[location] then
+        for kode, data in pairs(ListGudang[location]) do
+            if data.owner == identifier then
+                return data
+            end
+        end
+    end
+    return nil
+end)
+
+lib.callback.register('gudang:loginPin', function(source, data)
     local lokasi = data.lokasi
     local kode = data.kode
     local pin = data.pin
     if ListGudang[lokasi] and ListGudang[lokasi][kode] then
         if ListGudang[lokasi][kode].pin == pin then
-            owned = ListGudang[lokasi][kode]
+            return ListGudang[lokasi][kode]
         end
     end
-    return owned
-end)
-
-lib.callback.register('gudang:checkMoney', function(source)
-    local Player = QBCore.Functions.GetPlayer(source)
-    return Player.PlayerData.money["cash"] >= Config.Gudang.price
+    return nil
 end)
 
 lib.callback.register('gudang:updatePin', function(source, data)
-    GudangUpdatePin(data)
-    return true
+    local xPlayer = ESX.GetPlayerFromId(source)
+    local kode = data.kode
+    local pin = data.pin
+    
+    local currentData = nil
+    for loc, list in pairs(ListGudang) do
+        if list[kode] then currentData = list[kode] break end
+    end
+
+    if currentData and currentData.owner == xPlayer.identifier then
+        MySQL.update.await('UPDATE gudang SET pin = ? WHERE kode = ?', {pin, kode})
+        ListGudang[currentData.lokasi][kode].pin = pin
+        return true
+    end
+    return false
 end)
 
-AddEventHandler("onResourceStart", function(resource)
-    if resource == GetCurrentResourceName() or resource == "ox_inventory" then
-        if not ListGudangStatus then
-            GetAllDataGudang()
-        end
-        Wait(5000)
-        SetupGudang()
-    end
+AddEventHandler('onResourceStart', function(resourceName)
+    if (GetCurrentResourceName() ~= resourceName) then return end
+    LoadAllGudang()
 end)

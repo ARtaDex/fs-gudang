@@ -1,113 +1,177 @@
-local QBCore = exports['qb-core']:GetCoreObject()
-local function OpenGudangWithPin(kode, pin, lokasi)
-  local _sendData = {}
-  _sendData.kode = kode
-  _sendData.pin = pin
-  _sendData.lokasi = lokasi
-  local ownedData = lib.callback.await('gudang:checkOwnedPin', false, _sendData)
-  if not ownedData then QBCore.Functions.Notify('Kode Gudang Atau Pin Salah', 'error', 7500) return end
-  exports.ox_inventory:openInventory('stash', {id=ownedData.lokasi..'_'..ownedData.kode})
+local ESX = exports['es_extended']:getSharedObject()
+
+local function AccessGudangByPin(lokasi)
+    local input = lib.inputDialog('Akses Gudang', {
+        { type = 'input', label = 'Kode Gudang', placeholder = 'ABCD12', required = true },
+        { type = 'input', label = 'PIN', password = true, required = true, icon = 'lock' },
+    })
+    if not input then return end
+    local kode = input[1]:upper()
+    local pin = input[2]
+
+    local data = lib.callback.await('gudang:loginPin', false, {
+        lokasi = lokasi,
+        kode = kode,
+        pin = pin
+    })
+
+    if data then
+        local stashId = data.lokasi .. '_' .. data.kode
+        exports.ox_inventory:openInventory('stash', stashId)
+    else
+        lib.notify({type = 'error', description = 'Kode atau PIN salah!'})
+    end
 end
 
-local function OpenGudangMenu(data)
-    local menulist= {}
-    local ownedData = lib.callback.await('gudang:checkOwned', false, data.location)
-    menulist[#menulist+1] = {
-        title = 'Akses Gudang Dengan Pin',
-        description = 'Akses Gudang Dengan Kode Gudang dan Pin',
-        icon = 'fas fa-unlock-alt',
-        onSelect = function()
-          local input = lib.inputDialog('Buka Gudang', {
-            { type = 'input', label = 'Kode Gudang', placeholder = 'Kode Gudang' },
-            { type = 'input', label = 'Pin', placeholder = 'Pin', password = true },
-          })
-          if not input then return end
-          if input[2] == "" then return end
-          OpenGudangWithPin(input[1], input[2], data.location)
-          print(json.encode(input, {indent=true}))
-        end,
-    }
-    if ownedData then
-        menulist[#menulist+1] = {
-            title = 'Buka Gudang Kamu',
-            description = "Kode Gudang Kamu: "..ownedData.kode:upper(),
-            icon = 'fas fa-inbox',
-            onSelect = function()
-              print("open gudang: "..ownedData.lokasi..'_'..ownedData.kode)
-              exports.ox_inventory:openInventory('stash', {id=ownedData.lokasi..'_'..ownedData.kode})
-            end,
-        }
-        menulist[#menulist+1] = {
-            title = 'Ubah Pin',
-            description = 'Ubah Pin Kode Gudang '..ownedData.kode:upper(),
-            icon = 'fas fa-unlock-alt',
-            onSelect = function()
-              local input = lib.inputDialog('Rubah Pin Gudang', {
-                { type = 'input', label = 'pin', placeholder = 'pin', password = true },
-              })
-              if not input then return end
-              local datasend = {}
-              datasend.kode = ownedData.kode
-              datasend.pin = input[1]
-              local response = lib.callback.await('gudang:updatePin', false, datasend)
-              if response then QBCore.Functions.Notify('Berhasil Merubah Pin', 'success', 7500) return end
-            end,
-        }
-    else
-        menulist[#menulist+1] = {
-            title = 'Beli Gudang',
-            description = 'Beli Gudang Dengan Harga '..tostring(Config.Gudang.price),
-            icon = 'fas fa-dollar',
-            onSelect = function()
-              local hasMoney = lib.callback.await('gudang:checkMoney', false)
-              if not hasMoney then QBCore.Functions.Notify('Tidak Memiliki Cukup Uang', 'error', 7500) return end
-              local input = lib.inputDialog('Buat Pin Gudang', {
-                { type = 'input', label = 'pin', placeholder = 'pin', password = true },
-              })
-              if not input then return end
-              local datasend = {}
-              datasend.location = data.location
-              datasend.pin = input[1]
-              print(json.encode(datasend, {indent=true}))
-              TriggerServerEvent('gudang:buyGudang', datasend)
-            end,
-        }
-    end
-    lib.registerContext({
-        id = 'gudang_menu',
-        title = "Gudang Menu",
-        options = menulist
+local function BuyGudang(hashLocation)
+    -- Input Dialog dengan Pilihan Tipe Sewa
+    local input = lib.inputDialog('Beli / Sewa Gudang', {
+        { 
+            type = 'select', 
+            label = 'Tipe Pembelian', 
+            options = {
+                { value = 'rent', label = 'Sewa '..Config.RentDuration..' Hari ($'..Config.PriceRent..')' },
+                { value = 'perm', label = 'Beli Permanen ($'..Config.PricePerm..')' }
+            },
+            required = true
+        },
+        { type = 'input', label = 'Buat PIN', password = true, required = true, icon = 'lock' },
     })
-    lib.showContext('gudang_menu')
+
+    if not input then return end
+
+    TriggerServerEvent('gudang:buyGudang', {
+        location = hashLocation,
+        type = input[1],
+        pin = input[2]
+    })
+end
+
+local function SellGudang(ownedData)
+    local alert = lib.alertDialog({
+        header = 'Hapus Gudang?',
+        content = 'Apakah anda yakin ingin menghapus/menjual gudang ini? Item didalamnya akan hilang aksesnya.',
+        centered = true,
+        cancel = true
+    })
+
+    if alert == 'confirm' then
+        TriggerServerEvent('gudang:sellGudang', {
+            kode = ownedData.kode,
+            lokasi = ownedData.lokasi
+        })
+    end
+end
+
+local function ChangePin(ownedData)
+    local input = lib.inputDialog('Ubah PIN Gudang '..ownedData.kode, {
+        { type = 'input', label = 'PIN Baru', password = true, required = true },
+    })
+    if not input then return end
+    local success = lib.callback.await('gudang:updatePin', false, {
+        kode = ownedData.kode,
+        pin = input[1]
+    })
+    if success then
+        lib.notify({type = 'success', description = 'PIN berhasil diubah'})
+    else
+        lib.notify({type = 'error', description = 'Gagal mengubah PIN'})
+    end
+end
+
+local function OpenGudangMenu(locationHash)
+    local ownedData = lib.callback.await('gudang:checkOwned', false, locationHash)
+    local options = {}
+
+    -- Opsi 1: Masuk pakai PIN
+    table.insert(options, {
+        title = 'Akses dengan Kode & PIN',
+        description = 'Masuk ke gudang orang lain atau gudangmu',
+        icon = 'unlock-keyhole',
+        onSelect = function() AccessGudangByPin(locationHash) end
+    })
+
+    -- Opsi 2: Menu Pemilik
+    if ownedData then
+        -- Format Status Expired
+        local statusText = "Permanen"
+        if ownedData.expired_at then
+            -- Konversi timestamp ke tanggal terbaca
+            statusText = "Sewa Habis: " .. os.date('%d/%m/%Y', ownedData.expired_at)
+        end
+
+        table.insert(options, {
+            title = 'Buka Gudang Saya',
+            description = 'Kode: ' .. ownedData.kode .. ' | ' .. statusText,
+            icon = 'box-open',
+            onSelect = function()
+                local stashId = ownedData.lokasi .. '_' .. ownedData.kode
+                exports.ox_inventory:openInventory('stash', stashId)
+            end
+        })
+
+        table.insert(options, {
+            title = 'Ganti PIN',
+            icon = 'user-lock',
+            onSelect = function() ChangePin(ownedData) end
+        })
+
+        table.insert(options, {
+            title = 'Jual / Hapus Gudang',
+            description = 'Kembalikan gudang (Refund '..(Config.RefundPercent*100)..'%)',
+            icon = 'trash-can',
+            iconColor = 'red',
+            onSelect = function() SellGudang(ownedData) end
+        })
+    else
+        -- Opsi 3: Beli (Jika belum punya)
+        table.insert(options, {
+            title = 'Beli / Sewa Gudang',
+            description = 'Mulai dari $' .. Config.PriceRent,
+            icon = 'money-bill',
+            onSelect = function() BuyGudang(locationHash) end
+        })
+    end
+
+    lib.registerContext({
+        id = 'gudang_main_menu',
+        title = 'Menu Gudang',
+        options = options
+    })
+    lib.showContext('gudang_main_menu')
 end
 
 Citizen.CreateThread(function()
-  for _, data in pairs(Config.Gudang.location) do
-      local blip = AddBlipForCoord(data.location.x, data.location.y, data.location.z)
-      SetBlipSprite(blip, 50)
-      SetBlipAsShortRange(blip, true)
-      SetBlipScale(blip, 0.7)
-      SetBlipColour(blip, 25)
-      BeginTextCommandSetBlipName("STRING")
-      AddTextComponentString(data.label)
-      EndTextCommandSetBlipName(blip)
-      exports["qb-target"]:AddCircleZone(data.hash, data.location, 1.0,{
-          name = data.hash,
-          debugPoly = false,
-          useZ = true,
-          }, {
-          options = {
-              {
-                  action = function()
-                      local datapass = {}
-                      datapass.location = data.hash
-                      OpenGudangMenu(datapass)
-                  end,
-                  icon = "fas fa-inbox",
-                  label = data.label,
-              },
-          },
-          distance = 1.5
-      })
-  end
+    for k, v in pairs(Config.Locations) do
+        
+        -- LOGIKA BLIP (Hanya buat blip jika config v.blip bernilai true)
+        if v.blip then
+            local blip = AddBlipForCoord(v.coords)
+            SetBlipSprite(blip, 473)
+            SetBlipDisplay(blip, 4)
+            SetBlipScale(blip, 0.7)
+            SetBlipColour(blip, 25)
+            SetBlipAsShortRange(blip, true)
+            BeginTextCommandSetBlipName("STRING")
+            AddTextComponentString(v.label)
+            EndTextCommandSetBlipName(blip)
+        end
+
+        -- LOGIKA TARGET/INTERAKSI (Tetap dibuat meskipun blip dimatikan)
+        exports.ox_target:addSphereZone({
+            coords = v.coords,
+            radius = 1.5,
+            debug = false,
+            options = {
+                {
+                    name = 'gudang_'..k,
+                    icon = 'fa-solid fa-warehouse',
+                    label = 'Akses ' .. v.label,
+                    onSelect = function()
+                        OpenGudangMenu(v.hash)
+                    end
+                }
+            }
+        })
+    end
 end)
